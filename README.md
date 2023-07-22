@@ -1,68 +1,46 @@
-# Une approche de reconstruction automatique de la géométrie des bureaux de vote
+# Automated reconstruction of french polling stations using `postgis`
 
-Script de reconstruction des géométries de bureau de vote depuis les adresses des électeurs.
-
-Utilise une approche basée sur des diagrammes de Voronoï sous contraintes des limites de la voirie. Les géométries des bureaux sont ensuite complétés par des zones environnantes sans adresses.
+This is a fork from [an original attempt](https://github.com/makinacorpus/bureaux-de-vote-reconstruction) which tackles most of the work. We just made this reproducible.
 
 ![](bureaux.png)
 
-## Import des adresses des électeurs
+# Script shell with docker
 
-En utilisant le jeu de données [Bureaux de vote et adresses de leurs électeurs ](https://www.data.gouv.fr/fr/datasets/bureaux-de-vote-et-adresses-de-leurs-electeurs/) de l'INSEE.
+We found the [original repository](https://github.com/makinacorpus/bureaux-de-vote-reconstruction) to be incrediby useful, yet we still lost a fair amount of time to reproduce its results.
 
-```
-curl https://www.data.gouv.fr/fr/datasets/r/5142e8a9-15f3-4216-b865-deeeb02dde70 | gzip > table-adresses-reu.csv.gz
-```
+Here's a first attempt at making it easier:
 
-```
-psql -c "
-CREATE TABLE dep(code_commune_ref varchar,reconstitution_code_commune varchar,id_brut_bv_reu varchar,id varchar,geo_adresse varchar,geo_type varchar,geo_score decimal,longitude float,latitude float,api_line varchar,nb_bv_commune integer,nb_adresses integer);"
+Just type `./make-bureaux-votes.sh help` and you should see the following:
 
-zcat table-adresses-reu.csv.gz | psql -c "COPY dep(code_commune_ref,reconstitution_code_commune,id_brut_bv_reu,id,geo_adresse,geo_type,geo_score,longitude,latitude,api_line,nb_bv_commune,nb_adresses) FROM STDIN WITH CSV HEADER"
-```
 
-## Import des limites de communes
+```shell
+$ ./make-bureaux-votes.sh help                                                                                                                                                                                                                                      
+██████╗░██╗░░░██╗██████╗░███████╗░█████╗░██╗░░░██╗██╗░░██╗  ██████╗░███████╗  ██╗░░░██╗░█████╗░████████╗███████╗
+██╔══██╗██║░░░██║██╔══██╗██╔════╝██╔══██╗██║░░░██║╚██╗██╔╝  ██╔══██╗██╔════╝  ██║░░░██║██╔══██╗╚══██╔══╝██╔════╝
+██████╦╝██║░░░██║██████╔╝█████╗░░███████║██║░░░██║░╚███╔╝░  ██║░░██║█████╗░░  ╚██╗░██╔╝██║░░██║░░░██║░░░█████╗░░
+██╔══██╗██║░░░██║██╔══██╗██╔══╝░░██╔══██║██║░░░██║░██╔██╗░  ██║░░██║██╔══╝░░  ░╚████╔╝░██║░░██║░░░██║░░░██╔══╝░░
+██████╦╝╚██████╔╝██║░░██║███████╗██║░░██║╚██████╔╝██╔╝╚██╗  ██████╔╝███████╗  ░░╚██╔╝░░╚█████╔╝░░░██║░░░███████╗
+╚═════╝░░╚═════╝░╚═╝░░╚═╝╚══════╝╚═╝░░╚═╝░╚═════╝░╚═╝░░╚═╝  ╚═════╝░╚══════╝  ░░░╚═╝░░░░╚════╝░░░░╚═╝░░░╚══════╝
+Usage: ./make-bureaux-votes.sh [command] [options]
+Available commands:
+  load: Download the polling center data.
+  setup: Start a PostGIS server in a Docker container.
+  init: Initialize the database with polling center data.
+  geos: Download and import geographic data.
+  connect: Open a connection to the PostgreSQL database.
+  import-map: Download and import OpenStreetMap data for France. Only after init, setup, imports.
+  transform: Execute a series of SQL scripts to process and transform the data. Only after init, setup, imports.
+  make-bureaux: Create geometric contours for the polling stations. Only after init, setup, imports.
+  post-process: Post-process the data by executing a series of SQL scripts. Only after init, setup, imports.
+  pre-install: Install necessary software including Docker and Postgres, and start the Docker service. Only after init, setup, imports.
+  export: Export the results to a .csv file, and copy the file from the Docker container to the host machine. Only after init, setup, imports.
 
-```
-# 228 Mo
-wget https://www.data.gouv.fr/fr/datasets/r/0e117c06-248f-45e5-8945-0e79d9136165 -O communes-20220101-shp.7z
-unzip communes-20220101-shp.zip
-shp2pgsql communes-20220101.shp | psql
-```
-
-## Import des données de voirie d’OpenStreetMap
-
-À l'aide de [imposm3](https://imposm.org/).
-```
-# 3.5 Go
-wget http://download.openstreetmap.fr/extracts/merge/france_metro_dom_com_nc-latest.osm.pbf
-imposm import -mapping imposm.yaml -read france_metro_dom_com_nc-latest.osm.pbf -overwritecache -write -connection postgis://fred@localhost/fred
-```
-
-## Exécution des scripts de traitement
-
-```
-psql -v ON_ERROR_STOP=1 -f 10_communes.sql
-psql -v ON_ERROR_STOP=1 -f 20_addresses.sql
-psql -v ON_ERROR_STOP=1 -f 30_blocks.sql
-psql -v ON_ERROR_STOP=1 -f 40_voronoi.sql
-psql -v ON_ERROR_STOP=1 -f 50_bureau.sql
-psql -v ON_ERROR_STOP=1 -f 60_block2.sql
-psql -v ON_ERROR_STOP=1 -f 70_fill.sql
-psql -v ON_ERROR_STOP=1 -f 80_clean.sql
-psql -v ON_ERROR_STOP=1 -f 90_total.sql
-```
-
-## Export
-
-### Conversion en PMTiles
-
-```
-docker run -it --rm -v /tmp:/data tippecanoe:latest \
-    tippecanoe \
-        -Z8 \
-        -z14 \
-        --attribution "INSEE REU 2022 - OpenStreetMap 2023" \
-        /data/bureau.fgb \
-        -o /data/bureau.pmtiles
+Order of execution (type `all` to execute all these commands in the specific order):
+(1) load
+(2) pre-install
+(3) setup
+(4) init
+(5) geos
+(6) transform
+(7) export
 ```
