@@ -131,14 +131,84 @@ function inner_prompt {
     "pre-install")
         sudo dnf install docker postgres pqsl;
         sudo yum install postgis-client.x86_64 postgis-utils.x86_64 postgis.x86_64;
+        sudo dnf install gdal;
         sudo systemctl start docker;
         curl -LO "https://github.com/omniscale/imposm3/releases/download/v0.11.1/imposm-0.11.1-linux-x86-64.tar.gz" ;
         tar -xvf imposm-0.11.1-linux-x86-64.tar.gz;
         sudo mv imposm-0.11.1-linux-x86-64/* /usr/local/bin/;
         ;;
     "export")
-        psql postgresql://postgres:1234@localhost:5432/postgres -c "COPY (SELECT insee, bureau, block_ids, ST_AsGeoJSON(geom) as geom FROM bureau) TO '/tmp/bureaux.csv' DELIMITER ',' CSV HEADER;"
-        sudo docker cp pg:/tmp/bureaux.csv .
+        shift;
+        # case on the second argument if it exists
+        case "$1" in
+        "shp")
+            echo "[..] Using pgSQL to SHP (pgsql2shp) to export..."
+            sudo pgsql2shp -p 5432 -h localhost -u postgres -P 1234 postgres bureau_total
+            sudo pgsql2shp -p 5432 -h localhost -u postgres -P 1234 postgres bureau
+            echo "✅ Using pgSQL to SHP (pgsql2shp) to export..."
+            ;;
+        "csv")
+            echo "[..] Copying from PostGIS DB to docker container FS..."
+            psql postgresql://postgres:1234@localhost:5432/postgres -c "COPY (SELECT insee, bureau, block_ids, ST_AsGeoJSON(geom) as geom FROM bureau) TO '/tmp/bureaux.raw.csv' DELIMITER ',' CSV HEADER;"
+            psql postgresql://postgres:1234@localhost:5432/postgres -c "COPY (SELECT insee, bureau, block_ids, ST_AsGeoJSON(geom) as geom FROM bureau_total) TO '/tmp/bureaux.final.csv' DELIMITER ',' CSV HEADER;"
+            echo "✅ Copying from PostGIS DB to docker container FS."
+            echo "[..] Copying from docker container FS to host local file..."
+            sudo docker cp pg:/tmp/bureaux.raw.csv .
+            sudo docker cp pg:/tmp/bureaux.final.csv .
+            echo "✅ Copying from docker container FS to host local file."
+            ;;
+        "json")
+            echo "[...] Copying from PostGIS DB to docker container FS..."
+            psql postgresql://postgres:1234@localhost:5432/postgres -c "COPY (SELECT json_agg(row_to_json(rows)) :: text FROM (SELECT insee, bureau, block_ids, ST_AsGeoJSON(geom) as geom FROM bureau_total) as rows) TO '/tmp/bureaux.final.json'";
+            psql postgresql://postgres:1234@localhost:5432/postgres -c "COPY (SELECT json_agg(row_to_json(rows)) :: text FROM (SELECT insee, bureau, block_ids, ST_AsGeoJSON(geom) as geom FROM bureau) as rows) TO '/tmp/bureaux.raw.json';"
+            echo "✅ Copying from PostGIS DB to docker container FS."
+            echo "[...] Copying from docker container FS to host local file..."
+            sudo docker cp pg:/tmp/bureaux.raw.json .
+            sudo docker cp pg:/tmp/bureaux.final.json .
+            echo "✅ Copying from docker container FS to host local file."
+            ;;
+        *)
+            echo "WARNING: No format specified. Assuming \`json\` & \`shp\` both passed."
+            echo "[..] Copying from PostGIS DB to docker container FS..."
+            psql postgresql://postgres:1234@localhost:5432/postgres -c "COPY (SELECT json_agg(row_to_json(rows)) :: text FROM (SELECT insee, bureau, block_ids, ST_AsGeoJSON(geom) as geom FROM bureau_total) as rows) TO '/tmp/bureaux.final.json'";
+            psql postgresql://postgres:1234@localhost:5432/postgres -c "COPY (SELECT json_agg(row_to_json(rows)) :: text FROM (SELECT insee, bureau, block_ids, ST_AsGeoJSON(geom) as geom FROM bureau) as rows) TO '/tmp/bureaux.raw.json';"
+            echo "✅ Copying from PostGIS DB to docker container FS."
+            echo "[..] Copying from docker container FS to host local file..."
+            sudo docker cp pg:/tmp/bureaux.raw.json .
+            sudo docker cp pg:/tmp/bureaux.final.json .
+            echo "✅ Copying from docker container FS to host local file."
+
+            sleep 1;
+            echo "[..] Using pgSQL to SHP (pgsql2shp) to export..."
+            sudo pgsql2shp -p 5432 -h localhost -u postgres -P 1234 postgres bureau_total
+            sudo pgsql2shp -p 5432 -h localhost -u postgres -P 1234 postgres bureau
+            echo "✅ Using pgSQL to SHP (pgsql2shp) to export..."
+            ;;
+        esac
+        ;;
+    "pack")
+        shift;
+        zip bureaux-vote-geom.shp.zip bureau_total.shp bureau_total.shx bureau_total.prj
+        zip bureaux-raw-data.shp.zip bureau.shp bureau.shx bureau.prj
+        ;;
+    "clean")
+        shift;
+        case "$1" in
+        "archives")
+            rm bureaux*zip;
+            ;;
+        "results")
+            rm bureau*;
+            ;;
+        "all")
+            rm -f *.{csv.gz,osm.pbf,osm.pbf.1,cpg,dbf,shx,shp,csv,json,prj,pmtiles,fgb};
+            rm -f communes-*;
+            ;;
+        *)
+            rm -f *.{csv.gz,osm.pbf,osm.pbf.1,cpg,dbf,shx,shp,csv,json,prj,pmtiles,fgb};
+            rm -f communes-*;
+            ;;
+        esac
         ;;
     *)
         echo "Unknown command: $1"
