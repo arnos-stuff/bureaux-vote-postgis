@@ -233,7 +233,8 @@ function inner_prompt {
             rm bureaux*zip 2> /dev/null;
             rm -f bureaux.*geojson 2> /dev/null;
             rm LICENSE* 2> /dev/null;
-            rm -rf imposm*
+            rm -rf imposm-* 2> /dev/null;
+            rm -rf blobs 2> /dev/null;
             ;;
         esac
         ;;
