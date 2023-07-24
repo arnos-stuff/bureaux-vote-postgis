@@ -66,7 +66,6 @@ function help() {
     fi
 }
 
-
 function inner_prompt {
     case "$1" in
     "load")
@@ -77,6 +76,7 @@ function inner_prompt {
     "setup")
         # Get pattern and extension from command line arguments
         sudo docker run --rm -P -p 127.0.0.1:5432:5432 -e POSTGRES_PASSWORD="1234" --name pg postgis/postgis > /dev/null 2>&1 &
+        ./wait-for-it.sh pg;
         echo "postgres server started."
         ;;
     "init")
@@ -121,6 +121,10 @@ function inner_prompt {
         ;;
     "make-bureaux")
         psql postgresql://postgres:1234@localhost:5432/postgres -v ON_ERROR_STOP=1 -f 50_bureau.sql
+        psql postgresql://postgres:1234@localhost:5432/postgres -v ON_ERROR_STOP=1 -f 60_block2.sql
+        psql postgresql://postgres:1234@localhost:5432/postgres -v ON_ERROR_STOP=1 -f 70_fill.sql
+        psql postgresql://postgres:1234@localhost:5432/postgres -v ON_ERROR_STOP=1 -f 80_clean.sql
+        psql postgresql://postgres:1234@localhost:5432/postgres -v ON_ERROR_STOP=1 -f 90_total.sql
         ;;
     "post-process")
         psql postgresql://postgres:1234@localhost:5432/postgres -v ON_ERROR_STOP=1 -f 60_block2.sql
@@ -129,7 +133,7 @@ function inner_prompt {
         psql postgresql://postgres:1234@localhost:5432/postgres -v ON_ERROR_STOP=1 -f 90_total.sql
         ;;
     "pre-install")
-        sudo dnf install docker postgres pqsl;
+        sudo dnf install docker postgres pqsl jq;
         sudo yum install postgis-client.x86_64 postgis-utils.x86_64 postgis.x86_64;
         sudo dnf install gdal;
         sudo systemctl start docker;
@@ -142,7 +146,7 @@ function inner_prompt {
         # case on the second argument if it exists
         case "$1" in
         "shp")
-            echo "[..] Using pgSQL to SHP (pgsql2shp) to export..."
+            echo "[..] Using pgSQL to SHP (pgsql2shp) to export.."
             sudo pgsql2shp -p 5432 -h localhost -u postgres -P 1234 postgres bureau_total
             sudo pgsql2shp -p 5432 -h localhost -u postgres -P 1234 postgres bureau
             echo "✅ Using pgSQL to SHP (pgsql2shp) to export..."
@@ -151,27 +155,40 @@ function inner_prompt {
             echo "[..] Copying from PostGIS DB to docker container FS..."
             psql postgresql://postgres:1234@localhost:5432/postgres -c "COPY (SELECT insee, bureau, block_ids, ST_AsGeoJSON(geom) as geom FROM bureau) TO '/tmp/bureaux.raw.csv' DELIMITER ',' CSV HEADER;"
             psql postgresql://postgres:1234@localhost:5432/postgres -c "COPY (SELECT insee, bureau, block_ids, ST_AsGeoJSON(geom) as geom FROM bureau_total) TO '/tmp/bureaux.final.csv' DELIMITER ',' CSV HEADER;"
+            psql postgresql://postgres:1234@localhost:5432/postgres -c "COPY (SELECT insee, bureau FROM bureau_total) TO '/tmp/index.csv' DELIMITER ',' CSV HEADER;"
             echo "✅ Copying from PostGIS DB to docker container FS."
             echo "[..] Copying from docker container FS to host local file..."
             sudo docker cp pg:/tmp/bureaux.raw.csv .
             sudo docker cp pg:/tmp/bureaux.final.csv .
+            sudo docker cp pg:/tmp/index.csv .
             echo "✅ Copying from docker container FS to host local file."
             ;;
         "json")
-            echo "[...] Copying from PostGIS DB to docker container FS..."
-            psql postgresql://postgres:1234@localhost:5432/postgres -c "COPY (SELECT json_agg(row_to_json(rows)) :: text FROM (SELECT insee, bureau, block_ids, ST_AsGeoJSON(geom) as geom FROM bureau_total) as rows) TO '/tmp/bureaux.final.json'";
-            psql postgresql://postgres:1234@localhost:5432/postgres -c "COPY (SELECT json_agg(row_to_json(rows)) :: text FROM (SELECT insee, bureau, block_ids, ST_AsGeoJSON(geom) as geom FROM bureau) as rows) TO '/tmp/bureaux.raw.json';"
+            shift;
+            if [ "$1" != "-s" ] && [ "$1" != "--skip" ]; then
+                echo "[...] Copying from PostGIS DB to docker container FS..."
+                psql postgresql://postgres:1234@localhost:5432/postgres -f export_geojson.sql
+            fi
             echo "✅ Copying from PostGIS DB to docker container FS."
-            echo "[...] Copying from docker container FS to host local file..."
-            sudo docker cp pg:/tmp/bureaux.raw.json .
-            sudo docker cp pg:/tmp/bureaux.final.json .
+            echo "[..] Copying from docker container FS to host local file..."
+            chunks=(10000 20000 30000 40000 50000 60000 70000)
+            old_chunk=0
+            for chunk in "${chunks[@]}"
+            do
+                fn="pg:/tmp/bureaux.chunk.idx.$old_chunk.$chunk.geojson";
+                echo "Copying file '$fn' from docker container FS to host FS..";
+                sudo docker cp $fn . ;
+                old_chunk=$chunk ;
+            done
             echo "✅ Copying from docker container FS to host local file."
+            echo "✅ Done."
             ;;
         *)
-            echo "WARNING: No format specified. Assuming \`json\` & \`shp\` both passed."
+            echo "WARNING: No format specified. Assuming \`json\` & \`csv\` both passed."
             echo "[..] Copying from PostGIS DB to docker container FS..."
-            psql postgresql://postgres:1234@localhost:5432/postgres -c "COPY (SELECT json_agg(row_to_json(rows)) :: text FROM (SELECT insee, bureau, block_ids, ST_AsGeoJSON(geom) as geom FROM bureau_total) as rows) TO '/tmp/bureaux.final.json'";
-            psql postgresql://postgres:1234@localhost:5432/postgres -c "COPY (SELECT json_agg(row_to_json(rows)) :: text FROM (SELECT insee, bureau, block_ids, ST_AsGeoJSON(geom) as geom FROM bureau) as rows) TO '/tmp/bureaux.raw.json';"
+            psql postgresql://postgres:1234@localhost:5432/postgres -c "COPY (SELECT insee, bureau, block_ids, ST_AsGeoJSON(geom) as geom FROM bureau) TO '/tmp/bureaux.raw.csv' DELIMITER ',' CSV HEADER;"
+            psql postgresql://postgres:1234@localhost:5432/postgres -c "COPY (SELECT insee, bureau, block_ids, ST_AsGeoJSON(geom) as geom FROM bureau_total) TO '/tmp/bureaux.final.csv' DELIMITER ',' CSV HEADER;"
+            psql postgresql://postgres:1234@localhost:5432/postgres -c "COPY (SELECT insee, bureau FROM bureau_total) TO '/tmp/index.csv' DELIMITER ',' CSV HEADER;"
             echo "✅ Copying from PostGIS DB to docker container FS."
             echo "[..] Copying from docker container FS to host local file..."
             sudo docker cp pg:/tmp/bureaux.raw.json .
@@ -188,25 +205,35 @@ function inner_prompt {
         ;;
     "pack")
         shift;
-        zip bureaux-vote-geom.shp.zip bureau_total.shp bureau_total.shx bureau_total.prj
-        zip bureaux-raw-data.shp.zip bureau.shp bureau.shx bureau.prj
+        if [ "$1" != "-s" ] && [ "$1" != "--skip" ]; then
+            pip install -U geopandas
+            python merge.py 2> /dev/null
+        fi
+        zip bureaux-vote-geom.shp.zip bureaux.final.shp bureaux.final.shx bureaux.final.prj
+        zip bureaux-vote-geom.fgb.zip bureaux.final.fgb bureaux.final.cpg bureaux.final.dbf
+        zip bureaux-vote-geombureaux-vote-geom.geojson.zip bureaux.final.geojson
         ;;
     "clean")
         shift;
         case "$1" in
         "archives")
-            rm bureaux*zip;
+            rm bureaux*zip 2> /dev/null;
+            rm bureaux-vote-geom* 2> /dev/null;
             ;;
         "results")
-            rm bureau*;
+            rm bureau* 2> /dev/null;
             ;;
         "all")
-            rm -f *.{csv.gz,osm.pbf,osm.pbf.1,cpg,dbf,shx,shp,csv,json,prj,pmtiles,fgb};
-            rm -f communes-*;
+            rm -f *.{csv.gz,osm.pbf,osm.pbf.1,cpg,dbf,shx,shp,csv,json,prj,pmtiles,fgb,geojson} 2> /dev/null;
+            rm -f communes-* 2> /dev/null;
             ;;
         *)
-            rm -f *.{csv.gz,osm.pbf,osm.pbf.1,cpg,dbf,shx,shp,csv,json,prj,pmtiles,fgb};
-            rm -f communes-*;
+            rm -f *.{csv.gz,osm.pbf,osm.pbf.1,cpg,dbf,shx,shp,csv,json,prj,pmtiles,fgb} 2> /dev/null;
+            rm -f communes-* 2> /dev/null;
+            rm bureaux*zip 2> /dev/null;
+            rm -f bureaux.*geojson 2> /dev/null;
+            rm LICENSE* 2> /dev/null;
+            rm -rf imposm*
             ;;
         esac
         ;;
@@ -221,11 +248,13 @@ function prompt {
     if [ "$1" == "all" ];then
         shift;
         echo "Running all commands .."
+        inner_prompt "clean";
         inner_prompt "load";
         inner_prompt "pre-install";
         inner_prompt "setup";
         inner_prompt "init";
         inner_prompt "geos";
+        inner_prompt "import-map";
         inner_prompt "transform";
         inner_prompt "export";
         exit 0
